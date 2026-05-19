@@ -8,21 +8,19 @@ const STRIP_HEADERS = new Set([
 ]);
 
 const PORT = process.env.PORT || 8080;
+const http = require("http");
 
-async function handler(req, res) {
+const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     let targetHost = req.headers["x-host"];
 
     if (url.pathname === "/" && !targetHost) {
-      const upgradeHeader = req.headers["upgrade"] || "";
-      if (upgradeHeader.toLowerCase() !== "websocket") {
-        const githubResponse = await fetch(GITHUB_PAGE);
-        const githubContent = await githubResponse.text();
-        res.writeHead(200, { "content-type": "text/html; charset=UTF-8" });
-        res.end(githubContent);
-        return;
-      }
+      const githubResponse = await fetch(GITHUB_PAGE);
+      const githubContent = await githubResponse.text();
+      res.writeHead(200, { "content-type": "text/html; charset=UTF-8" });
+      res.end(githubContent);
+      return;
     }
 
     if (!targetHost) {
@@ -54,12 +52,22 @@ async function handler(req, res) {
     if (clientIp) headers["x-forwarded-for"] = clientIp;
 
     const method = req.method;
+
+    let body = undefined;
+    if (method !== "GET" && method !== "HEAD") {
+      body = await new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on("data", chunk => chunks.push(chunk));
+        req.on("end", () => resolve(Buffer.concat(chunks)));
+        req.on("error", reject);
+      });
+    }
+
     const fetchOptions = {
       method,
       headers,
       redirect: "manual",
-      body: (method !== "GET" && method !== "HEAD") ? req : undefined,
-      duplex: "half",
+      body: body || undefined,
     };
 
     const upstream = await fetch(targetUrl, fetchOptions);
@@ -70,23 +78,18 @@ async function handler(req, res) {
       responseHeaders[key] = value;
     }
 
+    const responseBody = await upstream.arrayBuffer();
     res.writeHead(upstream.status, responseHeaders);
-    const reader = upstream.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(value);
-    }
-    res.end();
+    res.end(Buffer.from(responseBody));
 
   } catch (error) {
-    res.writeHead(502);
-    res.end("Bad Gateway: Relay Failed");
+    if (!res.headersSent) {
+      res.writeHead(502);
+      res.end("Bad Gateway: Relay Failed");
+    }
   }
-}
+});
 
-const http = require("http");
-const server = http.createServer(handler);
 server.listen(PORT, () => {
   console.log(`Relay running on port ${PORT}`);
 });
